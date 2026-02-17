@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Editor Simples de PDF</title>
+
+  <!-- PDF.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+  <!-- pdf-lib -->
+  <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      background: #f0f0f0;
+    }
+
+    canvas {
+      border: 1px solid #000;
+      cursor: crosshair;
+      margin-top: 20px;
+    }
+
+    button {
+      margin: 10px;
+      padding: 10px 20px;
+      font-size: 15px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+<h2>Remover Área do PDF</h2>
+
+<input type="file" id="upload" accept="application/pdf">
+<br>
+<button onclick="zoomOut()">Diminuir Zoom (-)</button>
+<button onclick="zoomIn()">Aumentar Zoom (+)</button>
+<button onclick="resetZoom()">Resetar Zoom</button>
+<span id="zoomLevel" style="margin-left: 10px; font-weight: bold;">100%</span>
+<br>
+<button onclick="desfazer()">Desfazer</button>
+<button onclick="gerarNovoPDF()">Baixar PDF Editado</button>
+<br>
+<canvas id="canvas"></canvas>
+
+<script>
+  const upload = document.getElementById('upload');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+
+  let escala = 1.5;
+  let imagemBase = new Image();
+  let historico = [];
+  let pdfAtual = null;
+  let edicoes = [];
+
+  let startX, startY, endX, endY;
+  let selecionando = false;
+
+  upload.addEventListener('change', async function(e) {
+    const file = e.target.files[0];
+    const reader = new FileReader();
+
+    reader.onload = async function() {
+      const pdfBytes = new Uint8Array(reader.result);
+
+      pdfAtual = await pdfjsLib.getDocument({data: pdfBytes}).promise;
+      edicoes = [];
+      renderizarPDF();
+    };
+
+    reader.readAsArrayBuffer(file);
+  });
+
+  canvas.addEventListener('mousedown', (e) => {
+    selecionando = true;
+    startX = e.offsetX;
+    startY = e.offsetY;
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (!selecionando) return;
+
+    endX = e.offsetX;
+    endY = e.offsetY;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(imagemBase, 0, 0);
+
+    ctx.strokeStyle = "red";
+    ctx.lineWidth = 2;
+
+    const x = Math.min(startX, endX);
+    const y = Math.min(startY, endY);
+    const w = Math.abs(endX - startX);
+    const h = Math.abs(endY - startY);
+
+    ctx.strokeRect(x, y, w, h);
+  });
+
+  canvas.addEventListener('mouseup', () => {
+    if (!selecionando) return;
+    selecionando = false;
+
+    const x = Math.min(startX, endX);
+    const y = Math.min(startY, endY);
+    const w = Math.abs(endX - startX);
+    const h = Math.abs(endY - startY);
+
+    ctx.drawImage(imagemBase, 0, 0);
+
+    ctx.fillStyle = "white";
+    ctx.fillRect(x, y, w, h);
+
+    const larguraOriginal = canvas.width;
+    const alturaOriginal = canvas.height;
+
+    edicoes.push({
+      x: x / larguraOriginal,
+      y: y / alturaOriginal,
+      w: w / larguraOriginal,
+      h: h / alturaOriginal
+    });
+
+    const novaImagem = canvas.toDataURL();
+    historico.push(novaImagem);
+    imagemBase.src = novaImagem;
+  });
+
+  function desfazer() {
+    if (historico.length > 1) {
+      historico.pop();
+      edicoes.pop();
+      const ultima = historico[historico.length - 1];
+      imagemBase.src = ultima;
+      imagemBase.onload = () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(imagemBase, 0, 0);
+      };
+    }
+  }
+
+  async function gerarNovoPDF() {
+    const { PDFDocument } = PDFLib;
+
+    const pdfDoc = await PDFDocument.create();
+
+    const imgData = canvas.toDataURL("image/png");
+    const imgBytes = await fetch(imgData).then(res => res.arrayBuffer());
+    const img = await pdfDoc.embedPng(imgBytes);
+
+    const page = pdfDoc.addPage([canvas.width, canvas.height]);
+
+    page.drawImage(img, {
+      x: 0,
+      y: 0,
+      width: canvas.width,
+      height: canvas.height
+    });
+
+    const pdfBytes = await pdfDoc.save();
+
+    const blob = new Blob([pdfBytes], { type: "application/pdf" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "pdf_editado.pdf";
+    link.click();
+  }
+
+  async function renderizarPDF() {
+    if (!pdfAtual) return;
+
+    const page = await pdfAtual.getPage(1);
+    const viewport = page.getViewport({scale: escala});
+    
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+
+    await page.render({
+      canvasContext: ctx,
+      viewport: viewport
+    }).promise;
+
+    ctx.fillStyle = "white";
+    for (const edicao of edicoes) {
+      const x = edicao.x * canvas.width;
+      const y = edicao.y * canvas.height;
+      const w = edicao.w * canvas.width;
+      const h = edicao.h * canvas.height;
+      ctx.fillRect(x, y, w, h);
+    }
+
+    imagemBase.src = canvas.toDataURL();
+    if (historico.length === 0) {
+      historico = [canvas.toDataURL()];
+    }
+    
+    atualizarZoomDisplay();
+  }
+
+  function zoomIn() {
+    escala += 0.25;
+    renderizarPDF();
+  }
+
+  function zoomOut() {
+    if (escala > 0.5) {
+      escala -= 0.25;
+      renderizarPDF();
+    }
+  }
+
+  function resetZoom() {
+    escala = 1.5;
+    renderizarPDF();
+  }
+
+  function atualizarZoomDisplay() {
+    const percentual = Math.round((escala / 1.5) * 100);
+    document.getElementById('zoomLevel').textContent = percentual + '%';
+  }
+</script>
+
+</body>
+</html>
